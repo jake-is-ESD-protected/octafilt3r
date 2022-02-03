@@ -1,11 +1,10 @@
 import math as m
 import numpy as np
 import matplotlib.pyplot as plt
-from rsa import sign
 from scipy import signal
 
 
-def gen_fc_fl_fu(_fmax, _fmin, _ratio):
+def _gen_fc_fl_fu(_fmax, _fmin, _ratio):
     
     n_octs = m.log2(_fmax/_fmin)
     _n_bands = m.ceil(n_octs/_ratio) + 1
@@ -13,19 +12,15 @@ def gen_fc_fl_fu(_fmax, _fmin, _ratio):
     _fls = np.array([cur_fc * 2. ** ((-1) * _ratio / 2) for cur_fc in _fcs])
     _fus = np.array([cur_fc * 2. ** (_ratio / 2) for cur_fc in _fcs])
 
-    # turn the arrays around to start with the upper bands
-    _fcs = _fcs[::-1] 
-    _fls = _fls[::-1]
-    _fus = _fus[::-1]
-
     return _fcs, _fls, _fus, _n_bands
 
 
-def gen_bandpass(_fs, _fl, _fu, _order=6, _display=False):
+def _gen_bandpass(_fs, _fl, _fu, _order=8, _display=False):
     ny = 1/2 * _fs
     lower = _fl / ny
     upper = _fu / ny
-    _sos = signal.butter(_order, [lower, upper], btype='bandpass', output='sos') # obtain sos matrix
+    # see https://dsp.stackexchange.com/questions/81285/sos-matrices-order-does-not-correspond-to-given-parameter-when-designing-bandpa
+    _sos = signal.butter(int(_order/2), [lower, upper], btype='bandpass', output='sos') # obtain sos matrix
 
     if _display:
         h, f = signal.sosfreqz(_sos,worN=1024, fs=_fs)
@@ -35,15 +30,100 @@ def gen_bandpass(_fs, _fl, _fu, _order=6, _display=False):
     return _sos
 
 
+def oct_bank(fs, fmax, fmin, ratio, order=8, display=False):
+
+    fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
+    sos = [[[]] for i in range(n_bands)]
+    decimation_map = _get_dec_fct()
+
+    for band in range(n_bands):
+        sos[band] = _gen_bandpass(fs/decimation_map[band], fls[band], fus[band], _order=order, _display=display)
+
+    return sos
+
+
+def rolling_oct_bank(x, fs, ratio, order, fmax, fmin, window_size, n_decimations=4, dec_ord=10):
+
+    # prepare signal
+    x = _sig2list(x)
+    n_frames = int(len(x)/window_size)
+    fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
+
+    # init arrays
+    zis_banks = np.zeros((len(fcs), int(order/2), 2))
+    zis_banks_next = zis_banks
+    zis_dec = np.zeros((n_decimations, int(dec_ord/2), 2))
+    zis_dec_next = zis_dec
+    oct_features = np.zeros((n_frames, len(fcs)))
+    y = np.zeros(window_size)
+
+
+    # obtain filterbank
+    sos = oct_bank(fs, fmax, fmin, ratio, order=order)
+    sos_dec = decimator_filt(fs, order=dec_ord, display=False)
+    
+
+    for frame in range(n_frames):
+
+        y = x[(frame * window_size):((frame + 1) * window_size)]
+        spl = np.zeros([len(fcs)])
+        act_band = len(fcs) - 1
+        
+        # no decimation
+        for i in range(int(1/ratio) + 1):
+            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            act_band -= 1   
+
+        y, zis_dec_next[0] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[0])
+        for i in range(int(1/ratio)):
+            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            act_band -= 1
+            
+        y, zis_dec_next[1] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[1])
+        for i in range(int(1/ratio)):
+            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            act_band -= 1
+            
+        y, zis_dec_next[2] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[2])
+        for i in range(int(1/ratio)):
+            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            act_band -= 1
+            
+        y, zis_dec_next[3] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[3])
+        remain = act_band + 1
+        for i in range(remain):
+            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            act_band -= 1
+             
+        zis_banks = zis_banks_next
+        oct_features[frame] = spl
+        zis_dec = zis_dec_next
+
+    return oct_features, fcs
+
+
+def oct_spectrogram(features, fs, window_size):
+    
+    plt.pcolormesh(np.transpose(features), cmap = 'rainbow')
+    plt.title('1/3 octave spectrogram')
+    plt.xlabel("Frames")
+    plt.ylabel("Bands")
+    plt.colorbar()
+
+
 def plot_bins(center_fqs, spl):
     
     spl_pad = np.zeros(len(spl))
-    fcs = center_fqs
-    fig = plt.figure(figsize = (15, 10))
+    fig = plt.figure(figsize = (10, 5))
 
     for i in range(len(spl_pad)):
 
-        start = min(spl)
+        start = min(spl) - 10
         stop = spl[i]
 
         if start < 0 and stop < 0:
@@ -55,16 +135,16 @@ def plot_bins(center_fqs, spl):
 
     # padding for full display
     spl_pad = np.append(spl_pad, 0)
-    fcs = np.append(fcs, 0)
+    fcs = np.append(center_fqs, center_fqs[-1] * 6/5)
     
     # https://stackoverflow.com/questions/44068435/setting-both-axes-logarithmic-in-bar-plot-matploblib
     plt.bar(np.array(fcs)[:-1],                         \
-        [spl_pad[i] for i in range(len(spl_pad))][:-1], \
+        np.array(spl_pad)[:-1],                         \
         bottom=start,                                   \
         width=np.diff(fcs),                             \
         log=True,                                       \
         ec="k",                                         \
-        align="edge")
+        align="center")
 
     plt.xscale("log")
     plt.yscale("linear")
@@ -74,61 +154,8 @@ def plot_bins(center_fqs, spl):
     plt.ylabel("dB SPL")
     plt.show()
 
-
-def plot_bode(center_fqs, spl):
-    # not mine
-    fig, ax = plt.subplots()
-    ax.semilogx(center_fqs, spl, 'b')
-    ax.grid(which='major')
-    ax.grid(which='minor', linestyle=':')
-    ax.set_xlabel(r'Frequency [Hz]')
-    ax.set_ylabel('Level [dB]')
-    plt.xlim(11, 25000)
-    ax.set_xticks([16, 31.5, 63, 125, 250, 500, 1000, 2000, 4000, 8000, 16000])
-    ax.set_xticklabels(['16', '31.5', '63', '125', '250', '500', '1k', '2k', '4k', '8k', '16k'])
-    plt.show()
-
-
-def oct_filterbank(x, n_bands, dec_factor, dec_iir_ord, fs, fls, fus, display=False, window_size=1024):
-
-    if int(len(x) / window_size) * window_size < len(x):
-        pad = np.full(window_size - (len(x) % window_size), 0)
-
-    elif len(x) < window_size:
-        pad = np.full(window_size - (len(x)), 0)
-
-    else:
-        pad = []
-
-    x = np.append(x, pad)
-    n_frames = int(len(x)/window_size)
-    oct_features = np.zeros((n_frames, n_bands))
-
-    for frame in range(n_frames):
-
-        frame_buf = x[frame * window_size:(frame + 1) * window_size]
-        spl = np.zeros(n_bands)
-        for band in range(n_bands):
-            if dec_factor[band] == 1:
-                x_dec = frame_buf
-            elif dec_factor[band] <= 8:
-                x_dec = signal.decimate(frame_buf, dec_factor[band], n=dec_iir_ord)
-            else:
-                x_dec = signal.decimate(frame_buf, int(dec_factor[band]/(dec_factor[band]/8)), n=dec_iir_ord)
-                x_dec = signal.decimate(x_dec, int(dec_factor[band]/8), n=dec_iir_ord)
-            cur_sos = gen_bandpass(_fs=int(fs/dec_factor[band]), _fl=fls[band], _fu=fus[band], _display=display)
-            sig_out = signal.sosfilt(cur_sos, x_dec)
-            ms = rms(sig_out, root=False)
-            #spl[band] = 10 * np.log10(ms / 2e-5)
-            spl[band] = 20 * np.log10(np.std(sig_out) / 2e-5)
-
-        oct_features[frame] = spl
-
-    return oct_features
-
-
 # be aware that this runs over in case of val not being between 0 and 1/-1
-def rms(buffer, root=True):
+def _rms(buffer, root=True):
     b_sum = 0
     for val in buffer:
         b_sum = b_sum + val ** 2
@@ -138,3 +165,71 @@ def rms(buffer, root=True):
         rms = np.sqrt(rms)
 
     return rms
+
+
+def _sig2list(x):
+    if type(x) is list:
+        return x
+    elif type(x) is np.ndarray:
+        return x.tolist()
+    elif type(x) is tuple:
+        return list(x)
+
+
+def _get_dec_fct():
+    factor = [  16, 16, 16, 16,     # custom decimation
+                16, 16, 16, 16,
+                16, 16, 16, 16,
+                16, 16, 16,
+                16, 16, 16,
+                8, 8, 8,
+                4, 4, 4,
+                2, 2, 2,
+                1, 1, 1, 1]
+    return factor
+
+
+def decimator_filt(fs, order=10, display=False):
+
+    sos = signal.butter(
+        N=order,
+        Wn=(fs/5) / (fs/2),   # this results in the cutoff frequency being at fs/5
+        btype='lowpass',
+        analog=False,
+        output='sos')
+
+    if display:
+        wn = 8192
+        w = np.zeros(wn)
+        h = np.zeros(wn, dtype=np.complex_)
+
+        w[:], h[:] = signal.sosfreqz(
+                sos,
+                worN=wn,
+                whole=False,
+                fs=fs)
+        
+        fig, ax = plt.subplots()
+        ax.semilogx(w, 20 * np.log10(abs(h) + np.finfo(float).eps), 'b')
+        ax.grid(which='major')
+        ax.grid(which='minor', linestyle=':')
+        ax.set_xlabel(r'Frequency [Hz]')
+        ax.set_ylabel('Amplitude [dB]')
+        ax.set_title('Decimation filter')             
+
+    return sos
+
+
+# this is intended to be used in a loop
+def rolling_decimate(x, factor, lp_sos, zi):
+
+    sig = np.asarray(x)
+    factor = int(factor)
+
+    y, zi_new = signal.sosfilt(lp_sos, sig, zi=zi)
+
+    for i in range(int(factor/2)):
+        y = y[1::2]
+
+    return y, zi_new
+    
