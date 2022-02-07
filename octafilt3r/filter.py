@@ -1,53 +1,84 @@
-import math as m
+# ------[Octafilt3r]------
+#   @ name: octafilter.filter
+#   @ auth: Jakob Tschavoll
+#   @ vers: 0.1
+#   @ date: 2022
+
+"""
+Module for octave-based filtering and spectrograms. Intended to be used for
+feature extraction for convolutional neural networks in audio classification.
+"""
+
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy import signal
+import scipy.signal as signal
+from octafilt3r import plot as o3plot
+
+__all__ = ['rolling_oct_bank', 'oct_bank']
 
 
-def _gen_fc_fl_fu(_fmax, _fmin, _ratio):
-    
-    n_octs = m.log2(_fmax/_fmin)
-    _n_bands = m.ceil(n_octs/_ratio) + 1
-    _fcs = np.array([_fmin * 2. ** (i * _ratio) for i in range(0, _n_bands)])
-    _fls = np.array([cur_fc * 2. ** ((-1) * _ratio / 2) for cur_fc in _fcs])
-    _fus = np.array([cur_fc * 2. ** (_ratio / 2) for cur_fc in _fcs])
+def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=2000, n_decimations=4, dec_ord=10):
+    """
+    Create a complete octave-filterbank of desired ratio, order and bandwidth which
+    direcctly computes the dBFS value of each frame of data of `window_size`. Both
+    the bandpass and decimation filters are butterworth filters.
 
-    return _fcs, _fls, _fus, _n_bands
+    Params
+    ------
+    `x`:                Input signal to filter and analyze.
+    `fs`:               Sampling rate of input signal.
+    `ratio`:            Octave split.
+    `order`:            Order of bandpassfilters (at least `order=6` is recommended).
+    `fmax`:             Upper frequency limit of interest.
+    `fmin`:             Lower frequency limit of interest.
+    `frame_size`:       Size of step in samples. The whole signal is split accordingly
+                        and analyzed in these steps. The smaller the size, the higher
+                        the definition in time, but the more fuzzy the overall filter
+                        quality.
+    `n_decimations`:    Number of desired decimations. A decimation applies an `anti-aliasing`
+                        filter and then halves the sample rate for faster computations. The
+                        position of decimations is fixed according to this diagram:
 
+                        `band[n], band[n-1], band[n-2], band[n-3]`
 
-def _gen_bandpass(_fs, _fl, _fu, _order=8, _display=False):
-    ny = 1/2 * _fs
-    lower = _fl / ny
-    upper = _fu / ny
-    # see https://dsp.stackexchange.com/questions/81285/sos-matrices-order-does-not-correspond-to-given-parameter-when-designing-bandpa
-    _sos = signal.butter(int(_order/2), [lower, upper], btype='bandpass', output='sos') # obtain sos matrix
+                        `--decimate 1--`
 
-    if _display:
-        h, f = signal.sosfreqz(_sos,worN=1024, fs=_fs)
-        plt.semilogx(h[1:], np.array([20 * m.log10(abs(value)) for value in f[1:]]), label=None)
-        plt.ylim(-120, 20)
-        
-    return _sos
+                        `band[n-4], band[n-5], band[n-6],`
 
+                        `--decimate 2--`
 
-def oct_bank(fs, fmax, fmin, ratio, order=8, display=False):
+                        `band[n-7], band[n-8], band[n-9],`
 
-    fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
-    sos = [[[]] for i in range(n_bands)]
-    decimation_map = _get_dec_fct()
+                        `--decimate 3--`
 
-    for band in range(n_bands):
-        sos[band] = _gen_bandpass(fs/decimation_map[band], fls[band], fus[band], _order=order, _display=display)
+                        `...`
 
-    return sos
+                        `--decimate n--`
 
+                        `remaining bands`
+                        
+    `dec_ord`:          Order of decimation AA-filters.
 
-def rolling_oct_bank(x, fs, ratio, order, fmax, fmin, window_size, n_decimations=4, dec_ord=10):
+    Returns
+    -------
+    `oct_features`:     feature matrix of dBFS levels across all frames present in `x`
+                        of shape `(n_frames, n_bands)`
+    `fcs`:              array of center-frequencies of all bands
+
+    Notes
+    -----
+    The bank is generated best when `fmin` is a `log2` of `fmin`, since octaves correspond to a doubling
+    in frequency.
+    ## IMPORTANT:
+    If the requested `fmax` has an upper cutoff-frequency (`-3dB point`) that is greater than `fs/2` (nyquist)
+    then the whole band will be missing to avoid aliasing. Requirement: `fmax * 2**(ratio/2) < fs/2`
+    """
+
 
     # prepare signal
     x = _sig2list(x)
-    n_frames = int(len(x)/window_size)
+    n_frames = int(len(x)/frame_size)
     fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
+    pascal = 1 # dummy value, causes result to be in dBFS
 
     # init arrays
     zis_banks = np.zeros((len(fcs), int(order/2), 2))
@@ -55,49 +86,41 @@ def rolling_oct_bank(x, fs, ratio, order, fmax, fmin, window_size, n_decimations
     zis_dec = np.zeros((n_decimations, int(dec_ord/2), 2))
     zis_dec_next = zis_dec
     oct_features = np.zeros((n_frames, len(fcs)))
-    y = np.zeros(window_size)
+    y = np.zeros(frame_size)
 
 
     # obtain filterbank
-    sos = oct_bank(fs, fmax, fmin, ratio, order=order)
-    sos_dec = decimator_filt(fs, order=dec_ord, display=False)
+    sos = oct_bank(fs, fmax, fmin, ratio, n_decimations, order=order)
+    sos_dec = _decimator_filt(fs, order=dec_ord, display=False)
     
 
     for frame in range(n_frames):
 
-        y = x[(frame * window_size):((frame + 1) * window_size)]
+        y = x[(frame * frame_size):((frame + 1) * frame_size)]
         spl = np.zeros([len(fcs)])
         act_band = len(fcs) - 1
+        d = 0
         
         # no decimation
         for i in range(int(1/ratio) + 1):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
-            act_band -= 1   
+            spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
+            act_band -= 1
 
-        y, zis_dec_next[0] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[0])
-        for i in range(int(1/ratio)):
-            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
-            act_band -= 1
-            
-        y, zis_dec_next[1] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[1])
-        for i in range(int(1/ratio)):
-            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
-            act_band -= 1
-            
-        y, zis_dec_next[2] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[2])
-        for i in range(int(1/ratio)):
-            y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
-            act_band -= 1
-            
-        y, zis_dec_next[3] = rolling_decimate(y, 2, sos_dec, zi=zis_dec[3])
+        # desired decimations
+        for d in range(n_decimations - 1):
+            y, zis_dec_next[0] = _rolling_decimate(y, sos_dec, zi=zis_dec[d])
+            for i in range(int(1/ratio)):
+                y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
+                spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
+                act_band -= 1
+
+        # last decimation
+        y, zis_dec_next[d+1] = _rolling_decimate(y, sos_dec, zi=zis_dec[d+1])
         remain = act_band + 1
         for i in range(remain):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 20 * np.log10((np.std(y_filt)) / 2e-5)
+            spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
             act_band -= 1
              
         zis_banks = zis_banks_next
@@ -107,59 +130,53 @@ def rolling_oct_bank(x, fs, ratio, order, fmax, fmin, window_size, n_decimations
     return oct_features, fcs
 
 
-def oct_spectrogram(features, fs, window_size):
+def oct_bank(fs, fmax, fmin, ratio, n_decimations, order=8, display=False):
+    """
+    Create the filterbank itself via butterworth bandpasses.
+
+    Params
+    ------
+    `fs`:               Sampling rate of later filtered signal.
+    `fmax`:             Upper frequency limit of interest.
+    `fmin`:             Lower frequency limit of interest.
+    `ratio`:            Octave split.
+    `n_deciamtions`:    Number of decimations across filterbank
+    `order`:            Order of bandpassfilters (at least `order=6` is recommended).
+    `display`:          Boolean for visual display of the whole filterbank
+
+    Returns
+    -------
+    `sos_bm`:       sos-matrix array of coefficients  for each band of shape `(n_bands, order/2, 6)`
     
-    plt.pcolormesh(np.transpose(features), cmap = 'rainbow')
-    plt.title('1/3 octave spectrogram')
-    plt.xlabel("Frames")
-    plt.ylabel("Bands")
-    plt.colorbar()
+    """
+    fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
+    sos_bm = [[[]] for i in range(n_bands)]
+    decimation_map = _get_dec_fct(n_bands, n_decimations)
+
+    for band in range(n_bands):
+        sos_bm[band] = _gen_bandpass(fs/decimation_map[band], fls[band], fus[band], order=order, display=display)
+
+    return sos_bm
 
 
-def plot_bins(center_fqs, spl):
-    
-    spl_pad = np.zeros(len(spl))
-    fig = plt.figure(figsize = (10, 5))
+def _rms(x, root=True):
+    """
+    Classic implementation of `RMS`-calculation.
 
-    for i in range(len(spl_pad)):
+    Params
+    ------
+    `x`:    Input signal.
+    `root`: Boolean for need for `sqrt()`-operation. (Not needed in power-calculations)
 
-        start = min(spl) - 10
-        stop = spl[i]
+    Returns
+    -------
+    `rms`:  Skalar rms-value of `x`
+    """
 
-        if start < 0 and stop < 0:
-            spl_pad[i] = abs(start - stop)
-        if start < 0 and stop >= 0:
-            spl_pad[i] = abs(start) + stop
-        if start >= 0:
-            spl_pad[i] = stop - start
-
-    # padding for full display
-    spl_pad = np.append(spl_pad, 0)
-    fcs = np.append(center_fqs, center_fqs[-1] * 6/5)
-    
-    # https://stackoverflow.com/questions/44068435/setting-both-axes-logarithmic-in-bar-plot-matploblib
-    plt.bar(np.array(fcs)[:-1],                         \
-        np.array(spl_pad)[:-1],                         \
-        bottom=start,                                   \
-        width=np.diff(fcs),                             \
-        log=True,                                       \
-        ec="k",                                         \
-        align="center")
-
-    plt.xscale("log")
-    plt.yscale("linear")
-    plt.grid(which='major')
-    plt.grid(which='minor', linestyle=':')
-    plt.xlabel("f")
-    plt.ylabel("dB SPL")
-    plt.show()
-
-# be aware that this runs over in case of val not being between 0 and 1/-1
-def _rms(buffer, root=True):
     b_sum = 0
-    for val in buffer:
-        b_sum = b_sum + val ** 2
-    rms = b_sum / (len(buffer))
+    for val in x:
+        b_sum += (val ** 2)
+    rms = b_sum / (len(x))
 
     if(root):
         rms = np.sqrt(rms)
@@ -176,60 +193,180 @@ def _sig2list(x):
         return list(x)
 
 
-def _get_dec_fct():
-    factor = [  16, 16, 16, 16,     # custom decimation
-                16, 16, 16, 16,
-                16, 16, 16, 16,
-                16, 16, 16,
-                16, 16, 16,
-                8, 8, 8,
-                4, 4, 4,
-                2, 2, 2,
-                1, 1, 1, 1]
-    return factor
+def _get_dec_fct(n_bands=31, n_decimations=4):
+    """
+    Obtain an array of decimation factors specific for number of bands and decimations.
+
+    Params
+    ------
+    `n_bands`:          Number of bands in filterbank.
+    `n_decimations`:    Number of desired decimations.
+                        The position of decimations is fixed according to this diagram:
+
+                        `band[n], band[n-1], band[n-2], band[n-3]`
+
+                        `--decimate 1--`
+
+                        `band[n-4], band[n-5], band[n-6],`
+
+                        `--decimate 2--`
+
+                        `band[n-7], band[n-8], band[n-9],`
+
+                        `--decimate 3--`
+
+                        `...`
+
+                        `--decimate n--`
+
+                        `remaining bands`
+
+    Returns
+    -------
+    `factor`:           Array of decimation factors starting with the highest factor (lowest band)
+
+    Notes
+    -----
+    Returns `None` and displays an error in case of too many decimations requested for too few bands.
+
+    """
+    act_band = 4
+    factor = [1,1,1,1]
+    exp = 1
+    
+    for i in range(n_decimations):
+
+        for j in range(3):
+            factor.append(2**exp)
+            act_band += 1
+        exp += 1    
+
+    remain = n_bands - act_band
+    if remain < 0:
+        print(f'DECIMATION ERROR in _get_dec_fct(n_bands={n_bands}, n_decimations={n_decimations}):')
+        print(f'\n<{n_bands}> bands are not enough to be decimated <{n_decimations}> times!\n')
+        return None
+
+    for i in range(remain):
+        factor.append(2**(exp-1))
+
+    return factor[::-1]
 
 
-def decimator_filt(fs, order=10, display=False):
+def _decimator_filt(fs, order=10, display=False):
+    """
+    Obtain the filter coefficients for the AA-lowpass (Butterworth) associated with the decimations.
 
+    Params
+    ------
+    `fs`:       Sampling rate of original signal.
+    `order`:    Order of the lowpass filter.
+    `display`:  Boolean for displaying the created filter.
+
+    Returns
+    -------
+    `sos`:      sos-matrix for the filter.
+
+    Notes
+    -----
+    Since the decimation reduces the sample rate, the filter coefficients stay the same for every decimation
+    because they are calculated relative to the nyquist frequency `fs/2`. To obtain decimation that neither
+    lets too much aliasing nor influence on the curent upper most band happen, the cutoff frequency of the
+    AA filter is set to a constant `1/5.5` of the sampling rate
+    """
     sos = signal.butter(
         N=order,
-        Wn=(fs/5) / (fs/2),   # this results in the cutoff frequency being at fs/5
+        Wn=(fs/5.5) / (fs/2),   # this results in the cutoff frequency being at fs/5.5
         btype='lowpass',
         analog=False,
         output='sos')
 
     if display:
-        wn = 8192
-        w = np.zeros(wn)
-        h = np.zeros(wn, dtype=np.complex_)
-
-        w[:], h[:] = signal.sosfreqz(
-                sos,
-                worN=wn,
-                whole=False,
-                fs=fs)
-        
-        fig, ax = plt.subplots()
-        ax.semilogx(w, 20 * np.log10(abs(h) + np.finfo(float).eps), 'b')
-        ax.grid(which='major')
-        ax.grid(which='minor', linestyle=':')
-        ax.set_xlabel(r'Frequency [Hz]')
-        ax.set_ylabel('Amplitude [dB]')
-        ax.set_title('Decimation filter')             
+        o3plot._display_filt(sos, fs, 'Decimation AA filter')
 
     return sos
 
 
-# this is intended to be used in a loop
-def rolling_decimate(x, factor, lp_sos, zi):
+def _rolling_decimate(x, lp_sos, zi):
+    """
+    Decimation function which applies the filter generated in `_decimator_filt`. To make continuous operation possible,
+    initial conditions can be set and received from this function.
 
+    Params
+    ------
+    `x`:        Signal to decimate.
+    `lp_sos`:   sos-matrix of AA-filter
+    `zi`:       Initial conditions for filter of shape `(order/2, 2)`
+
+    Returns
+    -------
+    `y`:        Downsampled signal
+    `zi_new`:   Current conditions which should then be passed to the next call of `_rolling_decimate`
+                (same shape as `zi`)
+    """
     sig = np.asarray(x)
-    factor = int(factor)
 
     y, zi_new = signal.sosfilt(lp_sos, sig, zi=zi)
 
-    for i in range(int(factor/2)):
-        y = y[1::2]
+    return y[1::2], zi_new
 
-    return y, zi_new
+
+def _gen_fc_fl_fu(fmax, fmin, ratio):
+    """
+    Generate the center, lower cutoff (-3dB point) and upper cutoff of all requested bands
+    which represent an octave filterbank of a given ratio.
+
+    Params
+    ------
+    `fmax`:     Upper frequency limit of interest.
+    `fmin`:     Lower frequency limit of interest.
+    `ratio`:    Octave split.
+
+    Returns
+    -------
+    `fcs`:      Array of all center frequencies (`0dB` point of filter)
+    `fls`:      Array of all lower cutoff frequencies (`-3dB` point of filter)
+    `fus`:      Array of all upper cutoff frequencies (`-3dB` point of filter)
+    `n_bands`:  Number of calculated bands (same as `len(fcs)`)
+    """
     
+    n_octs = np.log2(fmax/fmin)
+    n_bands = int(np.ceil(n_octs/ratio))
+    fcs = np.array([fmin * 2. ** (i * ratio) for i in range(0, n_bands)])
+    fls = np.array([cur_fc * 2. ** ((-1) * ratio / 2) for cur_fc in fcs])
+    fus = np.array([cur_fc * 2. ** (ratio / 2) for cur_fc in fcs])
+
+    return fcs, fls, fus, n_bands
+
+
+def _gen_bandpass(fs, fl, fu, order=8, display=False):
+    """
+    Generate coefficients for a single bandpass which satisfies octave filter requirements.
+
+    Params
+    ------
+    `fs`:       Sampling rate of intended input signal.
+    `fl`:       Lower cutoff frequency (`-3dB`-point).
+    `fu`:       Upper cutoff frequency (`-3dB`-point).
+    `order`:    Order of the filter.
+    `display`:  Boolean for display of the filter.
+
+    Returns
+    -------
+    `sos`:      sos-matrix of filter coefficients specific to that band
+
+    Notes
+    -----
+    The general understanding of `order` for bandpass filters used to be ambiguous when passed to the
+    `scipy`-function `signal.butter()`. See discussion [here](https://dsp.stackexchange.com/questions/81285/sos-matrices-order-does-not-correspond-to-given-parameter-when-designing-bandpa).
+    This has since been updated in the documentation.
+    """
+    ny = 1/2 * fs
+    l = fl / ny
+    u = fu / ny
+    sos = signal.butter(int(order/2), [l, u], btype='bandpass', output='sos') # obtain sos matrix
+
+    if display:
+        o3plot._display_filt(sos, fs, 'Filterbank')
+        
+    return sos
