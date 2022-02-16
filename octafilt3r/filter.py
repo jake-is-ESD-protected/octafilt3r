@@ -1,7 +1,7 @@
 # ------[Octafilt3r]------
 #   @ name: octafilter.filter
 #   @ auth: Jakob Tschavoll
-#   @ vers: 0.1
+#   @ vers: 0.2
 #   @ date: 2022
 
 """
@@ -79,6 +79,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
     n_frames = int(len(x)/frame_size)
     fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
     pascal = 1 # dummy value, causes result to be in dBFS
+    lim_zero = 1e-20
 
     # init arrays
     zis_banks = np.zeros((len(fcs), int(order/2), 2))
@@ -104,7 +105,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
         # no decimation
         for i in range(int(1/ratio) + 1):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
+            spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
             act_band -= 1
 
         # desired decimations
@@ -112,7 +113,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
             y, zis_dec_next[0] = _rolling_decimate(y, sos_dec, zi=zis_dec[d])
             for i in range(int(1/ratio)):
                 y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-                spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
+                spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
                 act_band -= 1
 
         # last decimation
@@ -120,7 +121,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
         remain = act_band + 1
         for i in range(remain):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 10 * np.log10((_rms(y_filt, False)) / pascal)
+            spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
             act_band -= 1
              
         zis_banks = zis_banks_next
