@@ -312,7 +312,7 @@ def _rolling_decimate(x, lp_sos, zi):
     return y[1::2], zi_new
 
 
-def _gen_fc_fl_fu(fmax, fmin, ratio):
+def _gen_fc_fl_fu(fmax, fmin, ratio, IEC=True):
     """
     Generate the center, lower cutoff (-3dB point) and upper cutoff of all requested bands
     which represent an octave filterbank of a given ratio.
@@ -322,6 +322,7 @@ def _gen_fc_fl_fu(fmax, fmin, ratio):
     `fmax`:     Upper frequency limit of interest.
     `fmin`:     Lower frequency limit of interest.
     `ratio`:    Octave split.
+    `IEC`:      Boolean for auto-generation of frequencies or standardized by IEC61260
 
     Returns
     -------
@@ -330,12 +331,33 @@ def _gen_fc_fl_fu(fmax, fmin, ratio):
     `fus`:      Array of all upper cutoff frequencies (`-3dB` point of filter)
     `n_bands`:  Number of calculated bands (same as `len(fcs)`)
     """
+
+    G = 10. ** (3. / 10.)
+
+    nom_mid_frqs = np.array([
+        25.0, 31.5, 40.0, 50.0, 63.0, 80.0, 100.0, 125.0, 160.0, 200.0, 
+        250.0, 315.0, 400.0, 500.0, 630.0, 800.0, 1000.0, 1250.0, 1600.0, 
+        2000.0, 2500.0, 3150.0, 4000.0, 5000.0, 6300.0, 8000.0, 10000.0, 
+        12500.0, 16000.0, 20000.0])
+
+    select_f = []
+    select_f = np.asarray(select_f)
+
+    for frq in nom_mid_frqs:
+        if ((frq <= fmax) and (frq >= fmin)):
+            select_f = np.append(select_f, frq)
     
-    n_octs = np.log2(fmax/fmin)
-    n_bands = int(np.ceil(n_octs/ratio))
-    fcs = np.array([fmin * 2. ** (i * ratio) for i in range(0, n_bands)])
-    fls = np.array([cur_fc * 2. ** ((-1) * ratio / 2) for cur_fc in fcs])
-    fus = np.array([cur_fc * 2. ** (ratio / 2) for cur_fc in fcs])
+    if(IEC):
+        fcs = select_f
+        n_bands = len(fcs)
+
+    else:
+        n_bands = int(np.ceil((np.log2(fmax/fmin))/ratio))
+
+        fcs = np.array([fmin * G ** (i * ratio) for i in range(0, n_bands)])
+
+    fls = np.array([cur_fc * G ** ((-1) * ratio / 2) for cur_fc in fcs])
+    fus = np.array([cur_fc * G ** (ratio / 2) for cur_fc in fcs])
 
     return fcs, fls, fus, n_bands
 
