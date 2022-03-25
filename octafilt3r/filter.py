@@ -110,7 +110,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
 
         # desired decimations
         for d in range(n_decimations - 1):
-            y, zis_dec_next[0] = _rolling_decimate(y, sos_dec, zi=zis_dec[d])
+            y, zis_dec_next[d] = _rolling_decimate(y, sos_dec, zi=zis_dec[d])
             for i in range(int(1/ratio)):
                 y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
                 spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
