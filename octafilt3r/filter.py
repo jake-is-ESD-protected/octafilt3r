@@ -63,6 +63,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
     `oct_features`:     feature matrix of dBFS levels across all frames present in `x`
                         of shape `(n_frames, n_bands)`
     `fcs`:              array of center-frequencies of all bands
+    `LEQ`:              array of equivalent energy levels for each frame
 
     Notes
     -----
@@ -73,12 +74,12 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
     then the whole band will be missing to avoid aliasing. Requirement: `fmax * 2**(ratio/2) < fs/2`
     """
 
-
     # prepare signal
     x = _sig2list(x)
     n_frames = int(len(x)/frame_size)
+    sec = int(len(x)/fs)
     fcs, fls, fus, n_bands = _gen_fc_fl_fu(fmax, fmin, ratio)
-    pascal = 1 # dummy value, causes result to be in dBFS
+    ref = 1 # dummy value, causes result to be in dBFS
     lim_zero = 1e-20
 
     # init arrays
@@ -88,6 +89,11 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
     zis_dec_next = zis_dec
     oct_features = np.zeros((n_frames, len(fcs)))
     y = np.zeros(frame_size)
+    LEQ = np.zeros(sec)
+
+    for s in range(sec):
+        y = x[(s * fs):((s + 1) * fs)]
+        LEQ[s] = 10 * np.log10((_rms(y, False) + lim_zero) / ref)
 
 
     # obtain filterbank
@@ -98,14 +104,14 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
     for frame in range(n_frames):
 
         y = x[(frame * frame_size):((frame + 1) * frame_size)]
-        spl = np.zeros([len(fcs)])
+        dbfs = np.zeros([len(fcs)])
         act_band = len(fcs) - 1
         d = 0
         
         # no decimation
         for i in range(int(1/ratio) + 1):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
+            dbfs[act_band] = 10 * np.log10((_rms(y_filt, False)+ lim_zero) / ref)
             act_band -= 1
 
         # desired decimations
@@ -113,7 +119,7 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
             y, zis_dec_next[d] = _rolling_decimate(y, sos_dec, zi=zis_dec[d])
             for i in range(int(1/ratio)):
                 y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-                spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
+                dbfs[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / ref)
                 act_band -= 1
 
         # last decimation
@@ -121,14 +127,14 @@ def rolling_oct_bank(x, fs, ratio=1/3, order=8, fmax=20000, fmin=20, frame_size=
         remain = act_band + 1
         for i in range(remain):
             y_filt, zis_banks_next[act_band] = signal.sosfilt(sos[act_band], y, zi=zis_banks[act_band])
-            spl[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / pascal)
+            dbfs[act_band] = 10 * np.log10((_rms(y_filt, False) + lim_zero) / ref)
             act_band -= 1
              
         zis_banks = zis_banks_next
-        oct_features[frame] = spl
+        oct_features[frame] = dbfs
         zis_dec = zis_dec_next
 
-    return oct_features, fcs
+    return oct_features, fcs, LEQ
 
 
 def oct_bank(fs, fmax, fmin, ratio, n_decimations, order=8, display=False):

@@ -16,7 +16,7 @@ from octafilt3r import filter as o3f
 __all__ = ['oct_spectrogram', 'plot_bins']
 
 
-def oct_spectrogram(features, fs, frame_size, fmax=20000, fmin=20, ratio=1/3, name='octave based spectrogram'):
+def oct_spectrogram(features, fs, frame_size, fmax=20000, fmin=20, ratio=1/3, name='octave based spectrogram', figsize=(14, 8)):
     """
     Draw a spectrogram of `dBFS`-levels derived from octave filters.
 
@@ -50,7 +50,7 @@ def oct_spectrogram(features, fs, frame_size, fmax=20000, fmin=20, ratio=1/3, na
         frame2s.append(fps * i)
         xlabels.append(str(int((fps * i) / fps)))
 
-    fig, ax = plt.subplots(figsize=(14, 8))
+    fig, ax = plt.subplots(figsize=figsize)
     plt.pcolormesh(feat, cmap = 'rainbow')
     plt.title(name)
     plt.xlabel("s")
